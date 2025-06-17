@@ -1,18 +1,30 @@
 #include <iostream>
 #include <chrono>
-#include <cstdint>
+#include <csignal>
+#include <atomic>
 using namespace std;
 
-constexpr double jiffy_duration_ns = 1'000'000'000.0 / 65536.0; // ≈ 15258.789 ns
+constexpr double jiffy_duration_ns = 1'000'000'000.0 / 65536.0;
+
+atomic<bool> running(true);
+chrono::high_resolution_clock::time_point start_time;
+uint64_t tick_count = 0;
+
+void handle_sigint(int signal) {
+    running = false;
+}
 
 int main() {
-    uint64_t tick_count = 0;
-    auto global_start = chrono::high_resolution_clock::now();
+    // Register Ctrl+C handler
+    signal(SIGINT, handle_sigint);
 
-    while (true) {
+    tick_count = 0;
+    start_time = chrono::high_resolution_clock::now();
+
+    while (running) {
         auto tick_start = chrono::high_resolution_clock::now();
 
-        // Busy-wait until jiffy duration passes (in nanoseconds)
+        // Busy-wait loop to simulate jiffy timing
         while (true) {
             auto now = chrono::high_resolution_clock::now();
             auto elapsed_ns = chrono::duration_cast<chrono::nanoseconds>(now - tick_start).count();
@@ -20,18 +32,17 @@ int main() {
         }
 
         tick_count++;
-
-        // Print stats every second (i.e., 65536 jiffies)
-        if (tick_count % 65536 == 0) {
-            auto now = chrono::high_resolution_clock::now();
-            auto total_elapsed = chrono::duration_cast<chrono::milliseconds>(now - global_start).count();
-            double seconds = total_elapsed / 1000.0;
-
-            cout << "Ticks: " << tick_count
-                      << " | Elapsed: " << seconds << " sec"
-                      << " | Rate: " << (tick_count / seconds) << " ticks/sec\n";
-        }
     }
+
+    // On Ctrl+C — print stats
+    auto end_time = chrono::high_resolution_clock::now();
+    auto elapsed_ms = chrono::duration_cast<chrono::milliseconds>(end_time - start_time).count();
+    double seconds = elapsed_ms / 1000.0;
+
+    cout << "\n--- Tick Simulation Ended ---\n";
+    cout << "Total Ticks: " << tick_count << "\n";
+    cout << "Elapsed Time: " << seconds << " sec\n";
+    cout << "Tick Rate: " << (tick_count / seconds) << " ticks/sec\n";
 
     return 0;
 }
