@@ -28,17 +28,24 @@ struct TickEvent {
 };
 
 struct SharedRingBuffer {
-    volatile bool producer_running;
-    volatile bool producer_finished;
-    volatile uint64_t total_generated;
-    volatile uint64_t dropped_count;
-    
-    volatile uint64_t head;
-    volatile uint64_t tail;
-    
+    // Control flags
+    atomic<bool> producer_running;
+    atomic<bool> producer_finished;
+    atomic<uint64_t> total_generated;
+    atomic<uint64_t> dropped_count;
+    atomic<uint64_t> head;
+    atomic<uint64_t> tail;
     char padding[64];
     
-    TickEvent events[RING_SIZE];
+    SharedRingBuffer() {
+        producer_running.store(false, memory_order_relaxed);
+        producer_finished.store(false, memory_order_relaxed);
+        total_generated.store(0, memory_order_relaxed);
+        dropped_count.store(0, memory_order_relaxed);
+        head.store(0, memory_order_relaxed);
+        tail.store(0, memory_order_relaxed);
+    }
+    // TickEvent events[RING_SIZE];
 };
 
 // Date structure for easier handling
@@ -250,52 +257,74 @@ int main() {
         cout << "Jiffies before today start: " << ticks << endl;
 
         cout << "Generator started for " << current_date.toString() << "! Beginning event processing...\n";
-    
+
         auto start_time = chrono::high_resolution_clock::now();
         
-        // Simple ring buffer consumer logic
+        // Simple ring buffer consumer logic with relaxed atomics
         while(keep_running) {
             bool processed_events = false;
             
+            // Load current ring buffer state with relaxed ordering for maximum performance
+            uint64_t current_tail = ring->tail.load(memory_order_relaxed);
+            uint64_t current_head = ring->head.load(memory_order_relaxed);
+            
             // Process available events
-            while(ring->tail != ring->head) {
-                // size_t index = ring->tail % RING_SIZE;
+            while(current_tail != current_head) {
+                // size_t index = current_tail % RING_SIZE;
                 // TickEvent event = ring->events[index];
                 
                 process_tick_event();
                 
-                ring->tail = (ring->tail + 1) % RING_SIZE;
+                // Update tail with relaxed ordering
+                current_tail = (current_tail + 1) % RING_SIZE;
+                ring->tail.store(current_tail, memory_order_relaxed);
                 processed_events = true;
+                
+                // Reload head to check for more events (batch processing optimization)
+                // if ((current_tail + 1) % 32 == 0) {  // Check every 32 events for better performance
+                //     current_head = ring->head.load(memory_order_relaxed);
+                // }
             }
             
             // Check if producer finished and buffer is empty
-            if (!processed_events && ring->producer_finished) {
-                // Final drain
-                while(ring->tail != ring->head) {
-                    // size_t index = ring->tail % RING_SIZE;
+            bool producer_finished = ring->producer_finished.load(memory_order_relaxed);
+            if (!processed_events && producer_finished) {
+                // Final drain - reload current state
+                current_tail = ring->tail.load(memory_order_relaxed);
+                current_head = ring->head.load(memory_order_relaxed);
+                
+                while(current_tail != current_head) {
+                    // size_t index = current_tail % RING_SIZE;
                     // TickEvent event = ring->events[index];
                     
                     process_tick_event();
                     
-                    ring->tail = (ring->tail + 1) % RING_SIZE;
+                    current_tail = (current_tail + 1) % RING_SIZE;
+                    ring->tail.store(current_tail, memory_order_relaxed);
                     processed_events = true;
+                    
+                    // Check for more events
+                    current_head = ring->head.load(memory_order_relaxed);
                 }
                 
                 if (!processed_events) {
-                    cout << "All events processed. Shutting down.\n";
+                    cout << "All events processed for " << current_date.toString() << ". Day complete.\n";
                     break;
                 }
             }
             
-            // Small yield if no events processed
+            // Small yield if no events processed - but don't yield too often
             if (!processed_events) {
-                std::this_thread::yield();
+                // Use a more efficient waiting strategy
+                static int yield_counter = 0;
+                if (++yield_counter % 1000 == 0) {  // Yield only every 1000 iterations
+                    std::this_thread::yield();
+                }
+            } else {
+                // Reset yield counter when we're processing events
+                static int yield_counter = 0;
+                yield_counter = 0;
             }
-
-            // if (ring->producer_finished) {
-            //         cout << "All events processed. Shutting down.\n";
-            //         break;
-            //     }
         }
 
         auto end_time = chrono::high_resolution_clock::now();
@@ -305,16 +334,20 @@ int main() {
         double sim_seconds = events_processed / static_cast<double>(JIFFIES_PER_SEC);
         double processing_rate = events_processed / elapsed_sec;
 
-        cout << fixed << setprecision(6);
-        cout << "\n=== SIMPLE RING BUFFER RECEIVER STATS ===\n";
-        // cout << "Events Processed:         " << events_processed << "\n";
-        cout << "Total Generated:          " << ring->total_generated << "\n";
-        cout << "Dropped by Producer:      " << ring->dropped_count << "\n";
-        cout << "Processing Success Rate:  " << (100.0 * events_processed / ring->total_generated) << "%\n";
-        cout << "Simulated Time:           " << sim_seconds << " sec\n";
+        // Read final statistics with relaxed ordering
+        uint64_t total_generated = ring->total_generated.load(memory_order_relaxed);
+        uint64_t dropped_count = ring->dropped_count.load(memory_order_relaxed);
 
+        cout << fixed << setprecision(6);
+        cout << "\n=== RELAXED ATOMIC RECEIVER STATS ===\n";
+        cout << "Events Processed:         " << events_processed << "\n";
+        cout << "Total Generated:          " << total_generated << "\n";
+        cout << "Dropped by Producer:      " << dropped_count << "\n";
+        cout << "Simulated Time:           " << sim_seconds << " sec\n";
+        
         total_days++;
 
+        // Reset event counter for next day
         events_processed = 0;
         
         // Move to next day
@@ -324,7 +357,6 @@ int main() {
         if (current_date <= end_date && keep_running) {
             sleep_until_next_9am(); 
         }
-
     }
 
     munmap(ring, shm_size);
