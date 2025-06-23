@@ -16,11 +16,11 @@ constexpr uint64_t JIFFIES_PER_SEC = 1 << 16;
 constexpr uint64_t START_TIME_SEC = 9 * 3600;
 constexpr uint64_t END_TIME_SEC = 15 * 3600 + 30 * 60;
 constexpr uint64_t TOTAL_SECONDS = END_TIME_SEC - START_TIME_SEC;
-constexpr uint64_t TOTAL_JIFFIES = TOTAL_SECONDS * JIFFIES_PER_SEC;
+volatile constexpr uint64_t TOTAL_JIFFIES = TOTAL_SECONDS * JIFFIES_PER_SEC;
 
 // Ring buffer size - must be power of 2
 constexpr size_t RING_SIZE = 3*JIFFIES_PER_SEC;  // 64K entries
-constexpr size_t RING_MASK = RING_SIZE - 1;
+// volatile constexpr size_t RING_MASK = 3*JIFFIES_PER_SEC - 1;
 
 volatile bool keep_running = true;
 
@@ -38,20 +38,24 @@ struct TickEvent {
 // Simplified shared structure
 struct SharedRingBuffer {
     // Control flags
-    volatile bool producer_running;
-    volatile bool producer_finished;
-    volatile uint64_t total_generated;
-    volatile uint64_t dropped_count;
-    
-    // Ring buffer indices - use regular volatiles to avoid alignment issues
-    volatile uint64_t head;
-    volatile uint64_t tail;
-    
-    // Padding to separate from data
+    atomic<bool> producer_running;
+    atomic<bool> producer_finished;
+    atomic<uint64_t> total_generated;
+    atomic<uint64_t> dropped_count;
+    atomic<uint64_t> head;
+    atomic<uint64_t> tail;
     char padding[64];
     
+    SharedRingBuffer() {
+        producer_running.store(false, memory_order_relaxed);
+        producer_finished.store(false, memory_order_relaxed);
+        total_generated.store(0, memory_order_relaxed);
+        dropped_count.store(0, memory_order_relaxed);
+        head.store(0, memory_order_relaxed);
+        tail.store(0, memory_order_relaxed);
+    }
     // Ring buffer data
-    TickEvent events[RING_SIZE];
+    // TickEvent events[RING_SIZE];
 };
 
 struct Date {
@@ -288,28 +292,28 @@ int main(int argc, char* argv[]) {
     cout << "Waiting 10 seconds for receiver...\n";
     sleep(10);
 
-    volatile uint64_t factor = 10;
+    volatile uint64_t factor = 1;
     uint64_t tick_count = 0;
     uint64_t successful_writes = 0;
     uint64_t dropped = 0;
-    uint64_t bufferfull = 0;
+    
 
     while(current_date <= end_date && keep_running){
 
-        // Reset buffers for new day
-        ring1->head = 0;
-        ring1->tail = 0;
-        ring1->total_generated = 0;
-        ring1->dropped_count = 0;
-        ring1->producer_running = false;
-        ring1->producer_finished = false;
+        // Reset buffers for new day using relaxed atomic operations
+        ring1->head.store(0, memory_order_relaxed);
+        ring1->tail.store(0, memory_order_relaxed);
+        ring1->total_generated.store(0, memory_order_relaxed);
+        ring1->dropped_count.store(0, memory_order_relaxed);
+        ring1->producer_running.store(false, memory_order_relaxed);
+        ring1->producer_finished.store(false, memory_order_relaxed);
         
-        ring2->head = 0;
-        ring2->tail = 0;
-        ring2->total_generated = 0;
-        ring2->dropped_count = 0;
-        ring2->producer_running = false;
-        ring2->producer_finished = false;
+        ring2->head.store(0, memory_order_relaxed);
+        ring2->tail.store(0, memory_order_relaxed);
+        ring2->total_generated.store(0, memory_order_relaxed);
+        ring2->dropped_count.store(0, memory_order_relaxed);
+        ring2->producer_running.store(false, memory_order_relaxed);
+        ring2->producer_finished.store(false, memory_order_relaxed);
 
         tick_count = 0;
         successful_writes = 0;
@@ -320,35 +324,41 @@ int main(int argc, char* argv[]) {
         cout << "Jiffies before today start: " << ticks << endl;
         cout << "Starting tick generation for " << current_date.toString() << "...\n";
 
-        ring1->producer_running = true;
-        ring2->producer_running = true;
+        ring1->producer_running.store(true, memory_order_relaxed);
+        ring2->producer_running.store(true, memory_order_relaxed);
         
         auto start_time = chrono::high_resolution_clock::now();
 
-        // Simple ring buffer logic
+        // Simple ring buffer logic with relaxed atomics
         if(factor == 0) {
             // Maximum speed
             while(keep_running && tick_count < TOTAL_JIFFIES) {
-                volatile bool buffer_1_has_space = (ring1->head + 1) % RING_SIZE != ring1->tail;
-                volatile bool buffer_2_has_space = (ring2->head + 1) % RING_SIZE != ring2->tail;
+                // Load current values with relaxed ordering for maximum performance
+                uint64_t head1 = ring1->head.load(memory_order_relaxed);
+                uint64_t tail1 = ring1->tail.load(memory_order_relaxed);
+                uint64_t head2 = ring2->head.load(memory_order_relaxed);
+                uint64_t tail2 = ring2->tail.load(memory_order_relaxed);
+                
+                bool buffer_1_has_space = (head1 + 1) % RING_SIZE != tail1;
+                bool buffer_2_has_space = (head2 + 1) % RING_SIZE != tail2;
 
                 if (buffer_1_has_space && buffer_2_has_space) {
-                    // Get timestamp once
+                    // Get timestamp once (commented out for performance)
                     // auto now = chrono::high_resolution_clock::now();
                     // uint64_t timestamp = chrono::duration_cast<chrono::nanoseconds>(
                     //     now.time_since_epoch()).count();
                     
                     // Write to buffer A
-                    // size_t index_1 = ring1->head % RING_SIZE;
+                    // size_t index_1 = head1 % RING_SIZE;
                     // ring1->events[index_1].tick_number = tick_count;
                     // ring1->events[index_1].timestamp_ns = timestamp;
-                    ring1->head = (ring1->head + 1) % RING_SIZE;
+                    ring1->head.store((head1 + 1) % RING_SIZE, memory_order_relaxed);
                     
                     // Write to buffer B  
-                    // size_t index_2 = ring2->head % RING_SIZE;
+                    // size_t index_2 = head2 % RING_SIZE;
                     // ring2->events[index_2].tick_number = tick_count;
                     // ring2->events[index_2].timestamp_ns = timestamp;
-                    ring2->head = (ring2->head + 1) % RING_SIZE;
+                    ring2->head.store((head2 + 1) % RING_SIZE, memory_order_relaxed);
                     
                     successful_writes++;
                 } else {
@@ -361,26 +371,32 @@ int main(int argc, char* argv[]) {
         } else {
             // Throttled generation
             while(keep_running && tick_count < TOTAL_JIFFIES) {
-                volatile bool buffer_1_has_space = (ring1->head + 1) % RING_SIZE != ring1->tail;
-                volatile bool buffer_2_has_space = (ring2->head + 1) % RING_SIZE != ring2->tail;
+                // Load current values with relaxed ordering
+                uint64_t head1 = ring1->head.load(memory_order_relaxed);
+                uint64_t tail1 = ring1->tail.load(memory_order_relaxed);
+                uint64_t head2 = ring2->head.load(memory_order_relaxed);
+                uint64_t tail2 = ring2->tail.load(memory_order_relaxed);
+                
+                bool buffer_1_has_space = (head1 + 1) % RING_SIZE != tail1;
+                bool buffer_2_has_space = (head2 + 1) % RING_SIZE != tail2;
 
                 if (buffer_1_has_space && buffer_2_has_space) {
-                    // Get timestamp once
+                    // Get timestamp once (commented out for performance)
                     // auto now = chrono::high_resolution_clock::now();
                     // uint64_t timestamp = chrono::duration_cast<chrono::nanoseconds>(
                     //     now.time_since_epoch()).count();
                     
                     // Write to buffer A
-                    // size_t index_1 = ring1->head % RING_SIZE;
+                    // size_t index_1 = head1 % RING_SIZE;
                     // ring1->events[index_1].tick_number = tick_count;
                     // ring1->events[index_1].timestamp_ns = timestamp;
-                    ring1->head = (ring1->head + 1) % RING_SIZE;
+                    ring1->head.store((head1 + 1) % RING_SIZE, memory_order_relaxed);
                     
                     // Write to buffer B  
-                    // size_t index_2 = ring2->head % RING_SIZE;
+                    // size_t index_2 = head2 % RING_SIZE;
                     // ring2->events[index_2].tick_number = tick_count;
                     // ring2->events[index_2].timestamp_ns = timestamp;
-                    ring2->head = (ring2->head + 1) % RING_SIZE;
+                    ring2->head.store((head2 + 1) % RING_SIZE, memory_order_relaxed);
                     
                     successful_writes++;
                 } else {
@@ -398,22 +414,21 @@ int main(int argc, char* argv[]) {
 
         auto end_time = chrono::high_resolution_clock::now();
         
-        // Update final statistics
-        ring1->total_generated = tick_count;
-        ring1->dropped_count = dropped;
-        ring1->producer_finished = true;
+        // Update final statistics with relaxed atomics
+        ring1->total_generated.store(tick_count, memory_order_relaxed);
+        ring1->dropped_count.store(dropped, memory_order_relaxed);
+        ring1->producer_finished.store(true, memory_order_relaxed);
 
-        ring2->total_generated = tick_count;
-        ring2->dropped_count = dropped;
-        ring2->producer_finished = true;
-        
+        ring2->total_generated.store(tick_count, memory_order_relaxed);
+        ring2->dropped_count.store(dropped, memory_order_relaxed);
+        ring2->producer_finished.store(true, memory_order_relaxed);
         
         auto elapsed_ms = chrono::duration_cast<chrono::milliseconds>(end_time - start_time).count();
         double seconds = elapsed_ms / 1000.0;
         double sim_seconds = tick_count / static_cast<double>(JIFFIES_PER_SEC);
 
         cout << fixed << setprecision(6);
-        cout << "\n=== SIMPLE RING BUFFER GENERATOR STATS ===\n";
+        cout << "\n=== RELAXED ATOMIC RING BUFFER GENERATOR STATS ===\n";
         cout << "Total Ticks Generated:    " << tick_count << "\n";
         cout << "Successful Buffer Writes: " << successful_writes << "\n";
         cout << "Dropped Events:           " << dropped << "\n";
@@ -424,20 +439,20 @@ int main(int argc, char* argv[]) {
         cout << "Buffer Write Rate:        " << (successful_writes / seconds) << " events/sec\n";
         cout << "Time Speedup Factor:      " << (sim_seconds / seconds) << "x\n";
 
-        // Reset buffers for new day
-        ring1->head = 0;
-        ring1->tail = 0;
-        ring1->total_generated = 0;
-        ring1->dropped_count = 0;
-        ring1->producer_running = false;
-        ring1->producer_finished = false;
+        // Reset buffers for new day - Second reset (you had this duplicated)
+        ring1->head.store(0, memory_order_relaxed);
+        ring1->tail.store(0, memory_order_relaxed);
+        ring1->total_generated.store(0, memory_order_relaxed);
+        ring1->dropped_count.store(0, memory_order_relaxed);
+        ring1->producer_running.store(false, memory_order_relaxed);
+        ring1->producer_finished.store(false, memory_order_relaxed);
         
-        ring2->head = 0;
-        ring2->tail = 0;
-        ring2->total_generated = 0;
-        ring2->dropped_count = 0;
-        ring2->producer_running = false;
-        ring2->producer_finished = false;
+        ring2->head.store(0, memory_order_relaxed);
+        ring2->tail.store(0, memory_order_relaxed);
+        ring2->total_generated.store(0, memory_order_relaxed);
+        ring2->dropped_count.store(0, memory_order_relaxed);
+        ring2->producer_running.store(false, memory_order_relaxed);
+        ring2->producer_finished.store(false, memory_order_relaxed);
 
         tick_count = 0;
         successful_writes = 0;
@@ -449,7 +464,6 @@ int main(int argc, char* argv[]) {
         if (current_date <= end_date && keep_running) {
             sleep_until_next_9am(); 
         }
-
     }
 
     // Cleanup
