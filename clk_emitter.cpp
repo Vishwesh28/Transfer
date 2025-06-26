@@ -26,12 +26,12 @@ using Clock = chrono::steady_clock;
 
 constexpr uint64_t JIFFIES_PER_SEC = 1 << 16;            // 65,536 jiffies/sec
 constexpr uint64_t START_TIME_SEC = 9 * 3600;
-constexpr uint64_t END_TIME_SEC = 15 * 3600 + 30 * 60;
+constexpr uint64_t END_TIME_SEC = 17 * 3600;
 constexpr uint64_t TOTAL_SECONDS = END_TIME_SEC - START_TIME_SEC;
 volatile uint64_t TOTAL_JIFFIES = TOTAL_SECONDS * JIFFIES_PER_SEC;
 constexpr size_t RECORD_SIZE = 88;
 volatile bool keep_running = true;
-string filename = "Data/sorted_filtered_data.DAT";
+string filename = "Data/sorted_filtered_data5.DAT";
 
 // -----------------------------------------------------------------------------------------------------
 
@@ -57,82 +57,58 @@ unordered_map<uint64_t, vector<string>> preprocess_jiffi_map(const string& filen
 // -----------------------------------------------------------------------------------------------------
 
 struct Date {
-    int year, month, day;
-    
-    Date(int y, int m, int d) : year(y), month(m), day(d) {}
-    
-    // Convert to days since epoch (1970-01-01)
-    int toDaysSinceEpoch() const {
-        struct tm tm = {};
-        tm.tm_year = year - 1900;
-        tm.tm_mon = month - 1;
-        tm.tm_mday = day;
-        tm.tm_hour = 0;
-        tm.tm_min = 0;
-        tm.tm_sec = 0;
-        tm.tm_isdst = -1;
-        
-        time_t time = mktime(&tm);
-        // cout<<time / (24 * 3600)<<endl;
-        return time / (24 * 3600);
+    int year, month, day, hour, minute, second;
+
+    Date(int y, int m, int d, int h = 0, int min = 0, int s = 0)
+        : year(y), month(m), day(d), hour(h), minute(min), second(s) {}
+
+    string toString() const {
+        ostringstream oss;
+        oss << year << "-" << setw(2) << setfill('0') << month
+            << "-" << setw(2) << day
+            << " " << setw(2) << hour << ":" << setw(2) << minute << ":" << setw(2) << second;
+        return oss.str();
     }
-    
-    // Add days to current date
+
+    bool operator<=(const Date& other) const {
+        return tie(year, month, day, hour, minute, second) <= tie(other.year, other.month, other.day, other.hour, other.minute, other.second);
+    }
+
+    bool operator<(const Date& other) const {
+        return tie(year, month, day, hour, minute, second) < tie(other.year, other.month, other.day, other.hour, other.minute, other.second);
+    }
+
     Date addDays(int days) const {
         struct tm tm = {};
         tm.tm_year = year - 1900;
         tm.tm_mon = month - 1;
         tm.tm_mday = day + days;
-        tm.tm_hour = 0;
-        tm.tm_min = 0;
-        tm.tm_sec = 0;
-        tm.tm_isdst = -1;
-        
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
+        tm.tm_sec = second;
         time_t time = mktime(&tm);
         struct tm* result = localtime(&time);
-        
-        return Date(result->tm_year + 1900, result->tm_mon + 1, result->tm_mday);
-    }
-    
-    bool operator<=(const Date& other) const {
-        return toDaysSinceEpoch() <= other.toDaysSinceEpoch();
-    }
-
-    bool operator<(const Date& other) const {
-        // cout<<toDaysSinceEpoch()<<"  "<<other.toDaysSinceEpoch()<<endl;
-        return toDaysSinceEpoch() < other.toDaysSinceEpoch();
-    }
-    
-    string toString() const {
-        ostringstream oss;
-        oss << year << "-" << setfill('0') << setw(2) << month << "-" << setw(2) << day;
-        return oss.str();
+        return Date(result->tm_year + 1900, result->tm_mon + 1, result->tm_mday, result->tm_hour, result->tm_min, result->tm_sec);
     }
 };
 
 // -----------------------------------------------------------------------------------------------------
 
 Date parseDate(const string& dateStr) {
-    int year, month, day;
-    char dash1, dash2;
+    int y, m, d, h, min, s;
+    char dash1, dash2, dash3, dash4, dash5;
     istringstream iss(dateStr);
-    
-    if (!(iss >> year >> dash1 >> month >> dash2 >> day) || dash1 != '-' || dash2 != '-') {
-        throw invalid_argument("Invalid date format. Use YYYY-MM-DD");
+    if (!(iss >> y >> dash1 >> m >> dash2 >> d >> dash3 >> h >> dash4 >> min >> dash5 >> s) ||
+        dash1 != '-' || dash2 != '-' || dash3 != '-' || dash4 != '-' || dash5 != '-') {
+        throw invalid_argument("Invalid format. Use YYYY-MM-DD-HH-MM-SS");
     }
-    
-    if (month < 1 || month > 12 || day < 1 || day > 31) {
-        throw invalid_argument("Invalid date values");
-    }
-    
-    return Date(year, month, day);
+    return Date(y, m, d, h, min, s);
 }
 
 // -----------------------------------------------------------------------------------------------------
 
 // Get number of jiffies from Jan 1, 1980 to virtual today 9:00 AM
-uint64_t jiffies_from_1980_to_virtual_day(const Date& target_date) {
-    // Epoch: 1980-01-01 00:00:00
+uint64_t jiffies_from_1980(const Date& dt) {
     tm base_tm = {};
     base_tm.tm_year = 1980 - 1900;
     base_tm.tm_mon = 0;
@@ -140,21 +116,18 @@ uint64_t jiffies_from_1980_to_virtual_day(const Date& target_date) {
     base_tm.tm_hour = 0;
     base_tm.tm_min = 0;
     base_tm.tm_sec = 0;
-    base_tm.tm_isdst = -1;
     time_t base_time = mktime(&base_tm);
 
-    // Virtual 9:00 AM of target date
-    tm day_tm = {};
-    day_tm.tm_year = target_date.year - 1900;
-    day_tm.tm_mon = target_date.month - 1;
-    day_tm.tm_mday = target_date.day;
-    day_tm.tm_hour = 9;
-    day_tm.tm_min = 0;
-    day_tm.tm_sec = 0;
-    day_tm.tm_isdst = -1;
-    time_t day_time = mktime(&day_tm);
+    tm target_tm = {};
+    target_tm.tm_year = dt.year - 1900;
+    target_tm.tm_mon = dt.month - 1;
+    target_tm.tm_mday = dt.day;
+    target_tm.tm_hour = dt.hour;
+    target_tm.tm_min = dt.minute;
+    target_tm.tm_sec = dt.second;
+    time_t target_time = mktime(&target_tm);
 
-    return static_cast<uint64_t>(day_time - base_time) * JIFFIES_PER_SEC;
+    return static_cast<uint64_t>(target_time - base_time) * JIFFIES_PER_SEC;
 }
 
 // -----------------------------------------------------------------------------------------------------
@@ -189,25 +162,25 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    Date start_date(2024, 9, 2);  // Default values
-    Date end_date(2024, 9, 3);
+    Date start_date(2024,9,2,9,0,0), end_date(2024,9,2,17,0,0);
 
     try {
         start_date = parseDate(argv[1]);
         end_date = parseDate(argv[2]);
-    } catch (const exception& e) {
-        cerr << "Error parsing dates: " << e.what() << endl;
-        printUsage(argv[0]);
+    } catch (...) {
+        cerr << "Error: Invalid datetime input\n";
         return 1;
     }
 
     if (!(start_date <= end_date)) {
-        cerr << "Error: Start date must be before or equal to end date\n";
+        cerr << "Error: Start datetime must be before or equal to end datetime\n";
         return 1;
     }
 
-    cout << "Starting tick generation from " << start_date.toString() 
-         << " to " << end_date.toString() << endl;
+    uint64_t start_jiffi = jiffies_from_1980(start_date);
+    uint64_t end_jiffi = jiffies_from_1980(end_date);
+
+    cout << "Starting tick generation from " << start_date.toString() << " (Jiffi: " << start_jiffi << ") " << " to " << end_date.toString() << " (Jiffi: " << end_jiffi << ") " << endl;
 
     Date current_date = start_date;
     int total_days = 0;
@@ -220,19 +193,19 @@ int main(int argc, char* argv[]) {
 
     vector<string> batch_records;
     constexpr int RECORD_SIZE = 88;
-    string line(RECORD_SIZE, '\0');
-    string jiffy_str = "";
-    uint64_t jiffies = 0;
-    string symbol_raw = "";
+    // string line(RECORD_SIZE, '\0');
+    // string jiffy_str = "";
+    // uint64_t jiffies = 0;
+    // string symbol_raw = "";
     
-    ifstream file(filename, ios::binary);
-    if (!file) {
-        cerr << "Failed to open file\n";
-        return 1;
-    }
+    // ifstream file(filename, ios::binary);
+    // if (!file) {
+    //     cerr << "Failed to open file\n";
+    //     return 1;
+    // }
 
-    string target_symbol1 = "ADANIENSOL";  
-    string target_symbol2 = "bBAJAJHIND";
+    // string target_symbol1 = "ADANIENSOL";  
+    // string target_symbol2 = "bBAJAJHIND";
 
     // -----------------------------------------------------------------------------------------------------
 
@@ -255,6 +228,7 @@ int main(int argc, char* argv[]) {
     volatile uint64_t sent = 0;
     volatile uint64_t base_jiffi = 0;
     uint64_t current_jiffi = 0;
+    auto it = jiffi_records.find(current_jiffi);
 
     // -----------------------------------------------------------------------------------------------------
 
@@ -264,9 +238,15 @@ int main(int argc, char* argv[]) {
         found = 0;
         sent = 0;
 
-        base_jiffi = jiffies_from_1980_to_virtual_day(current_date);
+        base_jiffi = jiffies_from_1980(current_date);
+        if(start_jiffi>base_jiffi){
+            base_jiffi = start_jiffi;
+        }
         current_jiffi = base_jiffi;
         TOTAL_JIFFIES = base_jiffi + TOTAL_SECONDS * JIFFIES_PER_SEC;
+        if(end_jiffi<TOTAL_JIFFIES){
+            TOTAL_JIFFIES = end_jiffi;
+        }
         cout << "-----------------------------------------------------------------------------------------------------" << endl << endl;
         cout << "Jiffies before today start: " << base_jiffi << endl;
         cout << "Starting tick generation for " << current_date.toString() << "...\n";
@@ -299,9 +279,10 @@ int main(int argc, char* argv[]) {
                 //     }
                 // }
 
-                auto it = jiffi_records.find(current_jiffi);
+                it = jiffi_records.find(current_jiffi);
                 if (it != jiffi_records.end()) {
                     batch_records = it->second;
+                    found += batch_records.size();
                 } 
                 
                 if (!batch_records.empty()) {
@@ -321,31 +302,32 @@ int main(int argc, char* argv[]) {
             for(;keep_running && current_jiffi < TOTAL_JIFFIES;){
 
                 batch_records.clear();
-                while (file.read(&line[0], RECORD_SIZE)) {
-                    jiffy_str = line.substr(22, 14);
-                    jiffies = stoull(jiffy_str);
+                // while (file.read(&line[0], RECORD_SIZE)) {
+                //     jiffy_str = line.substr(22, 14);
+                //     jiffies = stoull(jiffy_str);
 
-                    if (jiffies < current_jiffi) {
-                        continue; 
-                    } else if (jiffies == current_jiffi) {
-                        batch_records.push_back(line);
-                        found++;
-                        // symbol_raw = line.substr(38, 10);
+                //     if (jiffies < current_jiffi) {
+                //         continue; 
+                //     } else if (jiffies == current_jiffi) {
+                //         batch_records.push_back(line);
+                //         found++;
+                //         // symbol_raw = line.substr(38, 10);
 
-                        // if (symbol_raw == target_symbol1 || symbol_raw == target_symbol2) {
-                        //     batch_records.push_back(line);
-                        //     found++;
-                        // }
-                    } else {
-                        file.seekg(-RECORD_SIZE, ios::cur);
-                        break;
-                    }
-                }
+                //         // if (symbol_raw == target_symbol1 || symbol_raw == target_symbol2) {
+                //         //     batch_records.push_back(line);
+                //         //     found++;
+                //         // }
+                //     } else {
+                //         file.seekg(-RECORD_SIZE, ios::cur);
+                //         break;
+                //     }
+                // }
 
-                // auto it = jiffi_records.find(current_jiffi);
-                // if (it != jiffi_records.end()) {
-                //     batch_records = it->second;
-                // } 
+                it = jiffi_records.find(current_jiffi);
+                if (it != jiffi_records.end()) {
+                    batch_records = it->second;
+                    found += batch_records.size();
+                } 
                 
                 if (!batch_records.empty()) {
                     string payload;
@@ -384,6 +366,8 @@ int main(int argc, char* argv[]) {
         cout << "Found:                   " << found << " \n";
         cout << "Sent:                    " << sent << " \n";
         cout << endl;
+
+        cout << "Jiffies after end: " << TOTAL_JIFFIES << endl;
         
         // -----------------------------------------------------------------------------------------------------
 
